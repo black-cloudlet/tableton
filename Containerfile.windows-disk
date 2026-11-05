@@ -1,4 +1,4 @@
-# Holds only the Windows 10 VM disk, so Containerfile_with_vm can copy it from
+# Holds only the Windows 10 VM disk, so the vm target of Containerfile can copy it from
 # quay instead of downloading it from archive.org on every build.
 # Built and pushed by .github/workflows/seed-windows-disk.yml.
 FROM scratch

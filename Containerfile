@@ -1,4 +1,16 @@
-FROM registry.redhat.io/rhel9/rhel-bootc:latest
+# One Containerfile, two variants, so they cannot drift:
+#   podman build --target base .   GUI, KVM, Chrome, Wine, desktop settings
+#   podman build --target vm   .   base plus an embedded Windows 10 VM (the default)
+# buildah skips stages a target does not use, so --target base never pulls
+# the Windows disk.
+
+# Windows 10 seed disk, published once to quay by
+# .github/workflows/seed-windows-disk.yml (see Containerfile.windows-disk).
+ARG WINDOWS_DISK_IMAGE=quay.io/rh-ee-sayash/windows10-disk:latest
+FROM ${WINDOWS_DISK_IMAGE} AS windows-disk
+
+# ====================== base ======================
+FROM registry.redhat.io/rhel9/rhel-bootc:latest AS base
 
 # --- Install Packages ---
 # 1. Install the core GUI base
@@ -105,5 +117,26 @@ picture-uri-dark='file:///usr/share/backgrounds/custom/background.png'\n\
 # F. Apply Settings
 RUN dconf update
 
-# ------ Perform checks on the final image. should always be the last line. ------
+# ------ Perform checks on the image. Always the last line of a target. ------
+RUN bootc container lint
+
+# ======================= vm =======================
+FROM base AS vm
+
+# --- Windows VM Setup ---
+COPY setup-windows-vm.sh /usr/local/bin/setup-windows-vm.sh
+RUN chmod +x /usr/local/bin/setup-windows-vm.sh
+COPY setup-windows-vm.service /etc/systemd/system/setup-windows-vm.service
+RUN systemctl enable setup-windows-vm.service
+
+COPY files/Windows-VM.sh /root/Desktop/Windows-VM.sh
+RUN chmod +x /root/Desktop/Windows-VM.sh
+
+# The ~3.8 GB disk goes last, so a change above does not re-copy it.
+# Ownership and mode are set in the same layer, so it is not duplicated by a
+# later chown/chmod.
+COPY --from=windows-disk --chown=qemu:qemu --chmod=644 \
+     /windows10.qcow2 /var/lib/libvirt/images/windows10.qcow2
+
+# ------ Perform checks on the image. Always the last line of a target. ------
 RUN bootc container lint

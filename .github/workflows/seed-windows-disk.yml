@@ -1,6 +1,6 @@
 # One-time (or whenever the disk changes): download the Windows 10 qcow2 and
 # publish it to quay as a small image that contains only the disk.
-# Containerfile_with_vm copies it from there with COPY --from.
+# The vm target of Containerfile copies it from there with COPY --from.
 #
 # Keep the quay repository private: Windows is Microsoft-licensed software.
 #

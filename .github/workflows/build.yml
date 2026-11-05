@@ -1,4 +1,4 @@
-# Build Containerfile_with_vm, push it to quay.io, then turn the pushed image
+# Build the vm target of Containerfile, push it to quay.io, then turn the pushed image
 # into an installer ISO, uploaded as a workflow artifact.
 #
 # Runs on GitHub-hosted x86_64 runners. All work happens inside a UBI container
@@ -10,7 +10,7 @@
 #   RH_REGISTRY_USER / RH_REGISTRY_PASSWORD     registry.redhat.io (rhel-bootc, bootc-image-builder)
 #   QUAY_USERNAME / QUAY_PASSWORD               push to quay.io/rh-ee-sayash/tableton, pull windows10-disk
 #
-# Run "seed Windows 10 disk image" once first: Containerfile_with_vm copies
+# Run "seed Windows 10 disk image" once first: the vm target copies
 # the Windows disk from quay.io/rh-ee-sayash/windows10-disk.
 name: build image and ISO
 
@@ -24,7 +24,7 @@ on:
 
 env:
   IMAGE: quay.io/rh-ee-sayash/tableton
-  CONTAINERFILE: Containerfile_with_vm
+  TARGET: vm
 
 jobs:
   build:
@@ -110,7 +110,7 @@ jobs:
           podman build \
             -t "$IMAGE:${{ steps.meta.outputs.tag }}" \
             -t "$IMAGE:latest" \
-            -f "$CONTAINERFILE" .
+            -f Containerfile --target "$TARGET" .
 
       - name: Image size
         run: |
