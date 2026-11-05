@@ -1,5 +1,5 @@
 # Build Containerfile_with_vm, push it to quay.io, then turn the pushed image
-# into an installer ISO and a qcow2 disk, both uploaded as workflow artifacts.
+# into an installer ISO, uploaded as a workflow artifact.
 #
 # Runs on GitHub-hosted x86_64 runners. All work happens inside a UBI container
 # so podman comes from RHEL and subscription-manager can entitle the dnf
@@ -9,13 +9,13 @@
 #   RHSM_USERNAME / RHSM_PASSWORD               Red Hat account, for entitlement
 #   RH_REGISTRY_USER / RH_REGISTRY_PASSWORD     registry.redhat.io (rhel-bootc, bootc-image-builder)
 #   QUAY_USERNAME / QUAY_PASSWORD               push access to quay.io/rh-ee-sayash/tableton (robot account)
-name: build image, ISO and qcow2
+name: build image and ISO
 
 on:
   workflow_dispatch:
     inputs:
-      disk-images:
-        description: Also build the ISO and qcow2 artifacts
+      iso:
+        description: Also build the installer ISO artifact
         type: boolean
         default: true
 
@@ -117,24 +117,13 @@ jobs:
         if: always()
         run: subscription-manager unregister || true
 
-  # bootc-image-builder turns the pushed image into a bootable artifact. One
-  # job per type: the ISO is driven by the kickstart in config.toml, which
-  # disk images like qcow2 reject, so qcow2 uses config-qcow2.toml.
-  disk-image:
+  # bootc-image-builder turns the pushed image into an unattended installer
+  # ISO, driven by the kickstart in config.toml.
+  iso:
     needs: build
-    if: inputs.disk-images
+    if: inputs.iso
     runs-on: ubuntu-24.04
     permissions: { contents: read }
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - type: anaconda-iso
-            config: config.toml
-            ext: iso
-          - type: qcow2
-            config: config-qcow2.toml
-            ext: qcow2
     container:
       image: registry.access.redhat.com/ubi9/ubi
       options: --privileged
@@ -142,7 +131,7 @@ jobs:
         - /mnt:/scratch
     env:
       SMDEV_CONTAINER_OFF: 1
-      OUT_NAME: tableton-${{ needs.build.outputs.tag }}.${{ matrix.ext }}
+      ISO_NAME: tableton-${{ needs.build.outputs.tag }}.iso
     steps:
       - uses: actions/checkout@v4
 
@@ -180,26 +169,26 @@ jobs:
           printf '%s' "$RH_REGISTRY_PASSWORD" | podman login registry.redhat.io -u "$RH_REGISTRY_USER" --password-stdin
           printf '%s' "$QUAY_PASSWORD" | podman login quay.io -u "$QUAY_USERNAME" --password-stdin
 
-      - name: Build ${{ matrix.ext }}
+      - name: Build ISO
         run: |
           podman pull "${{ needs.build.outputs.image-ref }}"
           podman run --rm --privileged --pull=newer \
             --security-opt label=type:unconfined_t \
-            -v "./${{ matrix.config }}:/config.toml:ro" \
+            -v ./config.toml:/config.toml:ro \
             -v ./output:/output \
             -v /var/lib/containers/storage:/var/lib/containers/storage \
             registry.redhat.io/rhel9/bootc-image-builder:latest \
-            --type "${{ matrix.type }}" --config /config.toml \
+            --type anaconda-iso --config /config.toml \
             "${{ needs.build.outputs.image-ref }}"
-          file=$(find output -type f -name "*.${{ matrix.ext }}" | head -1)
-          [ -n "$file" ] || { echo "::error::no .${{ matrix.ext }} produced"; find output; exit 1; }
-          mv "$file" "output/$OUT_NAME"
+          file=$(find output -type f -name "*.iso" | head -1)
+          [ -n "$file" ] || { echo "::error::no ISO produced"; find output; exit 1; }
+          mv "$file" "output/$ISO_NAME"
           ls -lh output/
 
       - uses: actions/upload-artifact@v4
         with:
-          name: tableton-${{ matrix.ext }}-${{ needs.build.outputs.tag }}
-          path: output/${{ env.OUT_NAME }}
+          name: tableton-iso-${{ needs.build.outputs.tag }}
+          path: output/${{ env.ISO_NAME }}
           retention-days: 7
 
       - name: Unregister
