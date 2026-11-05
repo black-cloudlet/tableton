@@ -1,6 +1,6 @@
 #!/bin/bash
 VM_NAME="windows-vm"
-DISK_PATH="/var/lib/libvirt/images/windows_server_2012_r2.qcow2"
+DISK_PATH="/var/lib/libvirt/images/windows10.qcow2"
 
 # 1. Wait for Libvirt to be active
 if ! systemctl is-active --quiet libvirtd; then

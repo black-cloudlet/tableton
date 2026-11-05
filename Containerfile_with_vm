@@ -37,9 +37,13 @@ RUN cp /usr/share/applications/google-chrome.desktop /root/Desktop/ && \
     chmod +x /root/Desktop/*.desktop
 
 # --- Windows VM Setup ---
-COPY windows_server_2012_r2.qcow2 /var/lib/libvirt/images/windows_server_2012_r2.qcow2
-RUN chown qemu:qemu /var/lib/libvirt/images/windows_server_2012_r2.qcow2 && \
-    chmod 644 /var/lib/libvirt/images/windows_server_2012_r2.qcow2
+# Windows 10 disk image (~3.8 GB) is downloaded at build time instead of being
+# stored in the repo, since it is too large for Git/GitHub.
+ARG WINDOWS_IMAGE_URL="https://archive.org/download/windows-image-collection/Windows%2010.qcow2"
+RUN mkdir -p /var/lib/libvirt/images && \
+    curl -fL --retry 5 -o /var/lib/libvirt/images/windows10.qcow2 "${WINDOWS_IMAGE_URL}" && \
+    chown qemu:qemu /var/lib/libvirt/images/windows10.qcow2 && \
+    chmod 644 /var/lib/libvirt/images/windows10.qcow2
     
 COPY setup-windows-vm.sh /usr/local/bin/setup-windows-vm.sh
 RUN chmod +x /usr/local/bin/setup-windows-vm.sh
