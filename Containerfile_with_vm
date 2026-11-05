@@ -32,7 +32,8 @@ gpgcheck=1\n\
 gpgkey=https://dl.google.com/linux/linux_signing_key.pub" > /etc/yum.repos.d/google-chrome.repo && \
     dnf -y install google-chrome-stable && \
     dnf clean all
-RUN cp /usr/share/applications/google-chrome.desktop /root/Desktop/ && \
+RUN mkdir -p /root/Desktop && \
+    cp /usr/share/applications/google-chrome.desktop /root/Desktop/ && \
     cp /usr/share/applications/virt-manager.desktop /root/Desktop/ && \
     chmod +x /root/Desktop/*.desktop
 

@@ -1,0 +1,207 @@
+# Build Containerfile_with_vm, push it to quay.io, then turn the pushed image
+# into an installer ISO and a qcow2 disk, both uploaded as workflow artifacts.
+#
+# Runs on GitHub-hosted x86_64 runners. All work happens inside a UBI container
+# so podman comes from RHEL and subscription-manager can entitle the dnf
+# installs in the Containerfile (GitHub has no RHEL-hosted runner).
+#
+# Required repository secrets:
+#   RHSM_USERNAME / RHSM_PASSWORD               Red Hat account, for entitlement
+#   RH_REGISTRY_USER / RH_REGISTRY_PASSWORD     registry.redhat.io (rhel-bootc, bootc-image-builder)
+#   QUAY_USERNAME / QUAY_PASSWORD               push access to quay.io/rh-ee-sayash/tableton (robot account)
+name: build image, ISO and qcow2
+
+on:
+  workflow_dispatch:
+    inputs:
+      disk-images:
+        description: Also build the ISO and qcow2 artifacts
+        type: boolean
+        default: true
+
+env:
+  IMAGE: quay.io/rh-ee-sayash/tableton
+  CONTAINERFILE: Containerfile_with_vm
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions: { contents: read }
+    container:
+      image: registry.access.redhat.com/ubi9/ubi
+      options: --privileged
+      # The runner's large ephemeral disk. The image (GUI + ~3.8 GB Windows
+      # disk) does not fit in the job container's writable layer.
+      volumes:
+        - /mnt:/scratch
+    env:
+      # Use this container's registration, not the (unsubscribed) host's.
+      SMDEV_CONTAINER_OFF: 1
+    outputs:
+      image-ref: ${{ steps.push.outputs.image-ref }}
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Container tools
+        run: dnf -y install podman buildah skopeo jq
+
+      # UBI's default policy demands signatures for registry.redhat.io content.
+      - name: Relax image signature policy in the builder
+        run: |
+          jq 'del(.transports)' /etc/containers/policy.json > /tmp/policy.json
+          mv /tmp/policy.json /etc/containers/policy.json
+
+      - name: Register with Red Hat
+        env:
+          RHSM_USERNAME: ${{ secrets.RHSM_USERNAME }}
+          RHSM_PASSWORD: ${{ secrets.RHSM_PASSWORD }}
+        run: subscription-manager register --username="$RHSM_USERNAME" --password="$RHSM_PASSWORD"
+
+      # podman needs native overlay on a real disk, or every layer commit walks
+      # the whole rootfs. The job container's / is overlayfs, hence the bind
+      # mounts onto /scratch (the runner's ext4 disk).
+      - name: Put container storage on the runner's disk
+        run: |
+          mkdir -p /scratch/containers /scratch/tmp /var/lib/containers /var/tmp
+          mount --bind /scratch/containers /var/lib/containers
+          mount --bind /scratch/tmp /var/tmp
+          sed -i '/^mountopt = /s/=.*/= "nodev,redirect_dir=off"/' /etc/containers/storage.conf
+          df -h /var/lib/containers
+          podman info --format '{{.Store.GraphDriverName}} {{.Store.GraphStatus}}' | tee /tmp/graph
+          grep -q 'Native Overlay Diff:true' /tmp/graph \
+            || { echo "::error::podman is not on native overlay; layer commits will take minutes each"; exit 1; }
+
+      - name: Compute tags
+        id: meta
+        run: |
+          tag="$(date -u +%Y%m%d)-${GITHUB_SHA::8}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "building $IMAGE:$tag and $IMAGE:latest"
+
+      - name: Logins
+        env:
+          RH_REGISTRY_USER: ${{ secrets.RH_REGISTRY_USER }}
+          RH_REGISTRY_PASSWORD: ${{ secrets.RH_REGISTRY_PASSWORD }}
+          QUAY_USERNAME: ${{ secrets.QUAY_USERNAME }}
+          QUAY_PASSWORD: ${{ secrets.QUAY_PASSWORD }}
+        run: |
+          printf '%s' "$RH_REGISTRY_PASSWORD" | podman login registry.redhat.io -u "$RH_REGISTRY_USER" --password-stdin
+          printf '%s' "$QUAY_PASSWORD" | podman login quay.io -u "$QUAY_USERNAME" --password-stdin
+
+      - name: Build
+        run: |
+          podman build \
+            -t "$IMAGE:${{ steps.meta.outputs.tag }}" \
+            -t "$IMAGE:latest" \
+            -f "$CONTAINERFILE" .
+
+      - name: Image size
+        run: |
+          bytes=$(podman image inspect --format '{{.Size}}' "$IMAGE:${{ steps.meta.outputs.tag }}")
+          echo "::notice title=image size::$((bytes / 1048576)) MiB"
+
+      # The dated tag is immutable (what you roll back to); latest is what
+      # installed machines follow.
+      - name: Push
+        id: push
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          podman push --digestfile=/tmp/digest "$IMAGE:$TAG"
+          podman push "$IMAGE:latest"
+          echo "image-ref=${IMAGE}@$(cat /tmp/digest)" >> "$GITHUB_OUTPUT"
+          echo "::notice title=pushed::${IMAGE}:${TAG} and :latest"
+
+      - name: Unregister
+        if: always()
+        run: subscription-manager unregister || true
+
+  # bootc-image-builder turns the pushed image into a bootable artifact. One
+  # job per type: the ISO is driven by the kickstart in config.toml, which
+  # disk images like qcow2 reject, so qcow2 uses config-qcow2.toml.
+  disk-image:
+    needs: build
+    if: inputs.disk-images
+    runs-on: ubuntu-24.04
+    permissions: { contents: read }
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - type: anaconda-iso
+            config: config.toml
+            ext: iso
+          - type: qcow2
+            config: config-qcow2.toml
+            ext: qcow2
+    container:
+      image: registry.access.redhat.com/ubi9/ubi
+      options: --privileged
+      volumes:
+        - /mnt:/scratch
+    env:
+      SMDEV_CONTAINER_OFF: 1
+      OUT_NAME: tableton-${{ needs.build.outputs.tag }}.${{ matrix.ext }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Container tools
+        run: dnf -y install podman skopeo jq
+
+      - name: Relax image signature policy in the builder
+        run: |
+          jq 'del(.transports)' /etc/containers/policy.json > /tmp/policy.json
+          mv /tmp/policy.json /etc/containers/policy.json
+
+      # anaconda-iso depsolves Anaconda from RHEL repos, so it needs entitlement.
+      - name: Register with Red Hat
+        env:
+          RHSM_USERNAME: ${{ secrets.RHSM_USERNAME }}
+          RHSM_PASSWORD: ${{ secrets.RHSM_PASSWORD }}
+        run: subscription-manager register --username="$RHSM_USERNAME" --password="$RHSM_PASSWORD"
+
+      - name: Put container storage and output on the runner's disk
+        run: |
+          mkdir -p /scratch/containers /scratch/tmp /scratch/output /var/lib/containers /var/tmp output
+          mount --bind /scratch/containers /var/lib/containers
+          mount --bind /scratch/tmp /var/tmp
+          mount --bind /scratch/output output
+          sed -i '/^mountopt = /s/=.*/= "nodev,redirect_dir=off"/' /etc/containers/storage.conf
+          df -h /var/lib/containers
+
+      - name: Logins
+        env:
+          RH_REGISTRY_USER: ${{ secrets.RH_REGISTRY_USER }}
+          RH_REGISTRY_PASSWORD: ${{ secrets.RH_REGISTRY_PASSWORD }}
+          QUAY_USERNAME: ${{ secrets.QUAY_USERNAME }}
+          QUAY_PASSWORD: ${{ secrets.QUAY_PASSWORD }}
+        run: |
+          printf '%s' "$RH_REGISTRY_PASSWORD" | podman login registry.redhat.io -u "$RH_REGISTRY_USER" --password-stdin
+          printf '%s' "$QUAY_PASSWORD" | podman login quay.io -u "$QUAY_USERNAME" --password-stdin
+
+      - name: Build ${{ matrix.ext }}
+        run: |
+          podman pull "${{ needs.build.outputs.image-ref }}"
+          podman run --rm --privileged --pull=newer \
+            --security-opt label=type:unconfined_t \
+            -v "./${{ matrix.config }}:/config.toml:ro" \
+            -v ./output:/output \
+            -v /var/lib/containers/storage:/var/lib/containers/storage \
+            registry.redhat.io/rhel9/bootc-image-builder:latest \
+            --type "${{ matrix.type }}" --config /config.toml \
+            "${{ needs.build.outputs.image-ref }}"
+          file=$(find output -type f -name "*.${{ matrix.ext }}" | head -1)
+          [ -n "$file" ] || { echo "::error::no .${{ matrix.ext }} produced"; find output; exit 1; }
+          mv "$file" "output/$OUT_NAME"
+          ls -lh output/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tableton-${{ matrix.ext }}-${{ needs.build.outputs.tag }}
+          path: output/${{ env.OUT_NAME }}
+          retention-days: 7
+
+      - name: Unregister
+        if: always()
+        run: subscription-manager unregister || true
