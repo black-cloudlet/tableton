@@ -1,0 +1,66 @@
+# One-time (or whenever the disk changes): download the Windows 10 qcow2 and
+# publish it to quay as a small image that contains only the disk.
+# Containerfile_with_vm copies it from there with COPY --from.
+#
+# Keep the quay repository private: Windows is Microsoft-licensed software.
+#
+# Required repository secrets:
+#   QUAY_USERNAME / QUAY_PASSWORD   push access to quay.io/rh-ee-sayash/windows10-disk
+name: seed Windows 10 disk image
+
+on:
+  workflow_dispatch:
+    inputs:
+      source-url:
+        description: Windows 10 qcow2 to publish
+        type: string
+        default: https://archive.org/download/windows-image-collection/Windows%2010.qcow2
+
+env:
+  IMAGE: quay.io/rh-ee-sayash/windows10-disk
+
+jobs:
+  seed:
+    runs-on: ubuntu-24.04
+    permissions: { contents: read }
+    steps:
+      - uses: actions/checkout@v4
+
+      # The runner's / has limited free space; /mnt is the large ephemeral disk.
+      # Both the download and podman's storage go there.
+      - name: Use the runner's large disk
+        run: |
+          sudo mkdir -p /mnt/work /mnt/containers
+          sudo chown "$USER" /mnt/work /mnt/containers
+          mkdir -p ~/.config/containers
+          printf '[storage]\ndriver = "overlay"\ngraphroot = "/mnt/containers"\n' > ~/.config/containers/storage.conf
+          df -h /mnt
+
+      - name: Download
+        env:
+          SOURCE_URL: ${{ inputs.source-url }}
+        run: |
+          curl -fL --retry 5 -o /mnt/work/windows10.qcow2 "$SOURCE_URL"
+          qemu-img info /mnt/work/windows10.qcow2 2>/dev/null || file /mnt/work/windows10.qcow2
+          sha256sum /mnt/work/windows10.qcow2 | tee /mnt/work/sha256
+          cp Containerfile.windows-disk /mnt/work/Containerfile
+
+      - name: Build
+        id: meta
+        run: |
+          tag="$(date -u +%Y%m%d)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          podman build -t "$IMAGE:$tag" -t "$IMAGE:latest" \
+            --label "org.opencontainers.image.source=${{ inputs.source-url }}" \
+            --label "tableton.windows-disk.sha256=$(cut -d' ' -f1 /mnt/work/sha256)" \
+            /mnt/work
+
+      - name: Push
+        env:
+          QUAY_USERNAME: ${{ secrets.QUAY_USERNAME }}
+          QUAY_PASSWORD: ${{ secrets.QUAY_PASSWORD }}
+        run: |
+          printf '%s' "$QUAY_PASSWORD" | podman login quay.io -u "$QUAY_USERNAME" --password-stdin
+          podman push "$IMAGE:${{ steps.meta.outputs.tag }}"
+          podman push "$IMAGE:latest"
+          echo "::notice title=pushed::$IMAGE:${{ steps.meta.outputs.tag }} and :latest"

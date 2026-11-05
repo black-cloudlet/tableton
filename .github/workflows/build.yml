@@ -8,7 +8,10 @@
 # Required repository secrets:
 #   RHSM_USERNAME / RHSM_PASSWORD               Red Hat account, for entitlement
 #   RH_REGISTRY_USER / RH_REGISTRY_PASSWORD     registry.redhat.io (rhel-bootc, bootc-image-builder)
-#   QUAY_USERNAME / QUAY_PASSWORD               push access to quay.io/rh-ee-sayash/tableton (robot account)
+#   QUAY_USERNAME / QUAY_PASSWORD               push to quay.io/rh-ee-sayash/tableton, pull windows10-disk
+#
+# Run "seed Windows 10 disk image" once first: Containerfile_with_vm copies
+# the Windows disk from quay.io/rh-ee-sayash/windows10-disk.
 name: build image and ISO
 
 on:
