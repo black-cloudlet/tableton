@@ -1,5 +1,6 @@
-# Build the vm target of Containerfile, push it to quay.io, then turn the pushed image
-# into an installer ISO, uploaded as a workflow artifact.
+# Build the vm target of Containerfile, rechunk it, push the chunked image to
+# quay.io, then turn it into an installer ISO, uploaded as a workflow artifact.
+# The build itself is build-and-push+chunk.sh, the same script used locally.
 #
 # Runs on GitHub-hosted x86_64 runners. All work happens inside a UBI container
 # so podman comes from RHEL and subscription-manager can entitle the dnf
@@ -105,29 +106,23 @@ jobs:
           printf '%s' "$RH_REGISTRY_PASSWORD" | podman login registry.redhat.io -u "$RH_REGISTRY_USER" --password-stdin
           printf '%s' "$QUAY_PASSWORD" | podman login quay.io -u "$QUAY_USERNAME" --password-stdin
 
-      - name: Build
-        run: |
-          podman build \
-            -t "$IMAGE:${{ steps.meta.outputs.tag }}" \
-            -t "$IMAGE:latest" \
-            -f Containerfile --target "$TARGET" .
-
-      - name: Image size
-        run: |
-          bytes=$(podman image inspect --format '{{.Size}}' "$IMAGE:${{ steps.meta.outputs.tag }}")
-          echo "::notice title=image size::$((bytes / 1048576)) MiB"
-
-      # The dated tag is immutable (what you roll back to); latest is what
-      # installed machines follow.
-      - name: Push
+      # The same script as local builds: build the plain image, clean up,
+      # rechunk it, check nothing was lost, push the chunked image. Only the
+      # chunked image is pushed; it is what devices install and update from.
+      - name: Build, chunk and push
         id: push
         env:
           TAG: ${{ steps.meta.outputs.tag }}
         run: |
-          podman push --digestfile=/tmp/digest "$IMAGE:$TAG"
-          podman push "$IMAGE:latest"
+          ./build-and-push+chunk.sh -t "$TAG" -d /tmp/digest "$TARGET"
           echo "image-ref=${IMAGE}@$(cat /tmp/digest)" >> "$GITHUB_OUTPUT"
-          echo "::notice title=pushed::${IMAGE}:${TAG} and :latest"
+          echo "::notice title=pushed::${IMAGE}:${TAG} and :latest (chunked)"
+
+      - name: Image size
+        run: |
+          bytes=$(podman image inspect --format '{{.Size}}' "$IMAGE:${{ steps.meta.outputs.tag }}")
+          layers=$(podman image inspect --format '{{len .RootFS.Layers}}' "$IMAGE:${{ steps.meta.outputs.tag }}")
+          echo "::notice title=image size::$((bytes / 1048576)) MiB in $layers layers"
 
       - name: Unregister
         if: always()

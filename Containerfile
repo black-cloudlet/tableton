@@ -30,6 +30,7 @@ RUN dnf -y install \
     qemu-kvm \
     dconf \
     e2fsprogs \
+    attr \
     gnome-shell-extension-desktop-icons && \
     dnf clean all
 
@@ -57,14 +58,19 @@ gpgkey=https://dl.google.com/linux/linux_signing_key.pub" > /etc/yum.repos.d/goo
 RUN sed -i 's|Exec=/usr/bin/google-chrome-stable %U|Exec=/usr/bin/google-chrome-stable %U --no-sandbox --test-type|g' /usr/share/applications/google-chrome.desktop
 
 # ---  Desktop Icons (Root + Global Skeleton) ---
-RUN mkdir -p /root/Desktop /etc/skel/Desktop
-
-# Copy Chrome and Virt-Manager to both Root and New Users
-RUN cp /usr/share/applications/google-chrome.desktop /root/Desktop/ && \
-    cp /usr/share/applications/virt-manager.desktop /root/Desktop/ && \
-    cp /usr/share/applications/google-chrome.desktop /etc/skel/Desktop/ && \
-    cp /usr/share/applications/virt-manager.desktop /etc/skel/Desktop/ && \
-    chmod +x /root/Desktop/*.desktop /etc/skel/Desktop/*.desktop
+# /root is /var/roothome on bootc, and the chunking step drops files under
+# /var. So root's icons ship in /usr/share/tableton/desktop and tmpfiles.d
+# copies each one into /root/Desktop at boot if it is not there yet.
+RUN mkdir -p /usr/share/tableton/desktop /etc/skel/Desktop && \
+    cp /usr/share/applications/google-chrome.desktop \
+       /usr/share/applications/virt-manager.desktop /usr/share/tableton/desktop/ && \
+    chmod +x /usr/share/tableton/desktop/*.desktop && \
+    cp -p /usr/share/tableton/desktop/*.desktop /etc/skel/Desktop/
+COPY <<'EOF' /usr/lib/tmpfiles.d/tableton-root-desktop.conf
+d /root/Desktop 0755 root root -
+C /root/Desktop/google-chrome.desktop - - - - /usr/share/tableton/desktop/google-chrome.desktop
+C /root/Desktop/virt-manager.desktop - - - - /usr/share/tableton/desktop/virt-manager.desktop
+EOF
 
 # Create a startup script that marks desktop icons as trusted on first login
 RUN echo '#!/bin/bash' > /etc/profile.d/trust-desktop-icons.sh && \
@@ -124,19 +130,27 @@ RUN bootc container lint
 FROM base AS vm
 
 # --- Windows VM Setup ---
-COPY setup-windows-vm.sh /usr/local/bin/setup-windows-vm.sh
-RUN chmod +x /usr/local/bin/setup-windows-vm.sh
+# /usr/libexec, not /usr/local: /usr/local is /var/usrlocal on bootc.
+COPY --chmod=755 setup-windows-vm.sh /usr/libexec/tableton/setup-windows-vm.sh
 COPY setup-windows-vm.service /etc/systemd/system/setup-windows-vm.service
 RUN systemctl enable setup-windows-vm.service
 
-COPY files/Windows-VM.sh /root/Desktop/Windows-VM.sh
-RUN chmod +x /root/Desktop/Windows-VM.sh
+COPY --chmod=755 files/Windows-VM.sh /usr/share/tableton/desktop/Windows-VM.sh
+COPY <<'EOF' /usr/lib/tmpfiles.d/tableton-windows-desktop.conf
+C /root/Desktop/Windows-VM.sh - - - - /usr/share/tableton/desktop/Windows-VM.sh
+EOF
 
 # The ~3.8 GB disk goes last, so a change above does not re-copy it.
-# Ownership and mode are set in the same layer, so it is not duplicated by a
-# later chown/chmod.
-COPY --from=windows-disk --chown=qemu:qemu --chmod=644 \
-     /windows10.qcow2 /var/lib/libvirt/images/windows10.qcow2
+# It lives in /usr, not /var: the chunking step (rpm-ostree compose
+# build-chunked-oci) drops regular files under /var, and bootc never updates
+# /var on an upgrade anyway. setup-windows-vm.sh copies it to
+# /var/lib/libvirt/images on first boot, where the VM can write to it.
+# user.component on the directory gives the disk its own layer in the chunked
+# image, so its digest stays the same until the disk itself changes.
+RUN mkdir -p /usr/share/tableton/windows && \
+    setfattr -n user.component -v windows-disk /usr/share/tableton/windows
+COPY --from=windows-disk --chmod=644 \
+     /windows10.qcow2 /usr/share/tableton/windows/windows10.qcow2
 
 # ------ Perform checks on the image. Always the last line of a target. ------
 RUN bootc container lint

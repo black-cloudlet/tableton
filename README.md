@@ -9,7 +9,7 @@ The device is assumed to be disconnected for most of its life. Updates, rollback
 `Containerfile` defines two variants as build targets, so they share one definition and cannot drift:
 
 - `base` (`quay.io/rh-ee-sayash/tableton-base`): everything below.
-- `vm` (`quay.io/rh-ee-sayash/tableton`, the default and what CI builds): `base` plus a Windows 10 VM disk, imported into libvirt as `windows-vm` on first boot, with a desktop shortcut to its console.
+- `vm` (`quay.io/rh-ee-sayash/tableton`, the default and what CI builds): `base` plus a Windows 10 VM disk, shipped read-only in `/usr/share/tableton/windows`, copied to `/var/lib/libvirt/images` and imported into libvirt as `windows-vm` on first boot, with a desktop shortcut to its console.
 
 The `base` target builds on `registry.redhat.io/rhel9/rhel-bootc` and adds:
 
@@ -25,10 +25,10 @@ The `base` target builds on `registry.redhat.io/rhel9/rhel-bootc` and adds:
 | --- | --- |
 | `Containerfile` | The bootc image definition, with `base` (GUI, KVM, Chrome, Wine, desktop settings) and `vm` (adds the Windows VM) targets. |
 | `Containerfile.windows-disk` | A scratch image holding only the Windows 10 disk, published to `quay.io/rh-ee-sayash/windows10-disk` by the seed workflow. |
-| `build-and-push+chunk.sh` | Builds a target (`vm` by default, or `base`), creates a chunked OCI copy with `rpm-ostree compose image`, and pushes both tags. |
+| `build-and-push+chunk.sh` | Builds a target (`vm` by default, or `base`), rechunks it with `rpm-ostree compose build-chunked-oci`, checks nothing was lost, and pushes the chunked image. CI runs the same script. |
 | `create-iso.sh` | Runs `bootc-image-builder` to turn a target's image (`vm` by default, or `base`) into an installer ISO. |
 | `config.toml` | `bootc-image-builder` config holding the Kickstart used by the ISO. |
-| `setup-windows-vm.sh` | Imports the embedded Windows disk into libvirt as `windows-vm` (4 GB RAM, 2 vCPUs, NAT network, VNC, autostart). |
+| `setup-windows-vm.sh` | Copies the embedded Windows disk to `/var/lib/libvirt/images` (once; never overwritten) and imports it into libvirt as `windows-vm` (4 GB RAM, 2 vCPUs, NAT network, VNC, autostart). |
 | `setup-windows-vm.service` | Oneshot systemd unit that runs the import script once the disk exists and libvirt is up. |
 | `files/background.png` | Desktop and login wallpaper. |
 | `files/Windows-VM.sh` | Desktop shortcut that opens the Windows VM console with `virt-viewer`. |
@@ -36,7 +36,7 @@ The `base` target builds on `registry.redhat.io/rhel9/rhel-bootc` and adds:
 
 ## Prerequisites
 
-- A RHEL 9 build host with `podman` and `rpm-ostree`, running as root (the ISO build needs `--privileged`).
+- A RHEL 9 build host with `podman`, running as root (chunking and the ISO build need `--privileged`). `rpm-ostree` is not needed on the host: the script runs it from the image it just built.
 - A Red Hat registry pull secret saved as `pull-secret.json` in the repository root. It is used to pull `rhel-bootc` and `bootc-image-builder` and to push the result. Do not commit it.
 - Push access to the target registries (`quay.io/rh-ee-sayash/tableton` and `tableton-base` in the scripts; change them for your own registry).
 - For the `vm` target, pull access to the private `quay.io/rh-ee-sayash/windows10-disk` (`podman login quay.io`).
@@ -50,7 +50,11 @@ The `base` target builds on `registry.redhat.io/rhel9/rhel-bootc` and adds:
 ./build-and-push+chunk.sh base   # base target -> quay.io/rh-ee-sayash/tableton-base
 ```
 
-This builds `:latest` from the chosen target of `Containerfile`, then builds a chunked variant tagged `:latest-chunked`. Chunking splits the image into smaller, more stable layers, so a device in the field downloads only the changed layers when it updates.
+Options: `-t TAG` also pushes an immutable `:TAG`, `-P` skips the push, `-a AUTHFILE` overrides `pull-secret.json`, `-d FILE` writes the pushed digest. CI runs this same script, so a local build is what CI builds.
+
+The script builds the target as `localhost/<name>-unchunked`, removes the Windows seed image and dangling layers, rechunks it with `rpm-ostree compose build-chunked-oci --bootc --format-version=2` into `:latest`, checks that no file under `/usr`, `/etc` or `/opt` went missing, and pushes. **Only the chunked image is pushed; it is what devices install and update from.** Chunking regroups the files by RPM into many layers whose digests stay the same between builds while their content does, so `bootc upgrade` downloads only the packages that changed, instead of the whole image after every fresh CI build. The previous `:latest` is pulled first so its layer layout is reused.
+
+Chunking drops regular files under `/var` (and `/root`, `/usr/local` and `/opt` can be links into `/var` on bootc). Anything the image needs goes in `/usr` or `/etc`: the Windows disk is in `/usr/share/tableton/windows` (its own layer, via the `user.component` xattr), and root's desktop icons are copied from `/usr/share/tableton/desktop` by `tmpfiles.d` at boot.
 
 The `vm` target copies the Windows disk from `quay.io/rh-ee-sayash/windows10-disk`, seeded once by the "seed Windows 10 disk image" workflow; the disk is not stored in this repository. Building `base` does not pull it.
 

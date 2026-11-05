@@ -2,11 +2,11 @@
 Description=Import Embedded Windows VM
 After=libvirtd.service virtqemud.socket
 Wants=libvirtd.service virtqemud.socket
-ConditionPathExists=/var/lib/libvirt/images/windows10.qcow2
+ConditionPathExists=/usr/share/tableton/windows/windows10.qcow2
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/setup-windows-vm.sh
+ExecStart=/usr/libexec/tableton/setup-windows-vm.sh
 RemainAfterExit=yes
 
 [Install]

@@ -1,5 +1,8 @@
 #!/bin/bash
+set -euo pipefail
 VM_NAME="windows-vm"
+# Shipped read-only in the image; copied once to a writable disk.
+SEED_DISK="/usr/share/tableton/windows/windows10.qcow2"
 DISK_PATH="/var/lib/libvirt/images/windows10.qcow2"
 
 # 1. Wait for Libvirt to be active
@@ -14,11 +17,20 @@ if virsh list --all --name | grep -q "^${VM_NAME}$"; then
     exit 0
 fi
 
-# 3. Ensure the Default Network is active (NAT)
+# 3. Copy the seed disk out of /usr. Never overwrite: after the first boot
+#    this is the VM's own disk, and a newer image's seed must not replace it.
+if [ ! -e "${DISK_PATH}" ]; then
+    echo "Copying ${SEED_DISK} to ${DISK_PATH}..."
+    install -o qemu -g qemu -m 644 "${SEED_DISK}" "${DISK_PATH}.tmp"
+    mv "${DISK_PATH}.tmp" "${DISK_PATH}"
+    restorecon "${DISK_PATH}" || true
+fi
+
+# 4. Ensure the Default Network is active (NAT)
 virsh net-start default || true
 virsh net-autostart default || true
 
-# 4. Import the VM (Generates XML and registers the VM)
+# 5. Import the VM (Generates XML and registers the VM)
 echo "Importing Windows VM..."
 virt-install \
   --name "${VM_NAME}" \
