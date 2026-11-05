@@ -26,24 +26,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The runner's / has limited free space; /mnt is the large ephemeral disk.
-      # Both the download and podman's storage go there.
-      - name: Use the runner's large disk
+      # A GitHub runner has ~14 GB free, and the disk needs ~3.6 GB for the
+      # download plus ~3.6 GB for the image layer. Delete the preinstalled
+      # SDKs we never use (~30 GB) so both fit.
+      - name: Free disk space
         run: |
-          sudo mkdir -p /mnt/work /mnt/containers
-          sudo chown "$USER" /mnt/work /mnt/containers
+          df -h / /mnt
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift /usr/local/share/powershell
+          sudo docker system prune -af >/dev/null 2>&1 || true
+          sudo swapoff -a && sudo rm -f /mnt/swapfile || true
+          df -h / /mnt
+
+      # Download and podman storage on the same disk, whichever has more room.
+      - name: Pick a work disk
+        run: |
+          root_free=$(df --output=avail -k / | tail -1)
+          mnt_free=$(df --output=avail -k /mnt | tail -1)
+          if [ "$mnt_free" -gt "$root_free" ]; then work=/mnt/seed; else work=$HOME/seed; fi
+          sudo mkdir -p "$work/ctx" "$work/containers" "$work/tmp"
+          sudo chown -R "$USER" "$work"
           mkdir -p ~/.config/containers
-          printf '[storage]\ndriver = "overlay"\ngraphroot = "/mnt/containers"\n' > ~/.config/containers/storage.conf
-          df -h /mnt
+          printf '[storage]\ndriver = "overlay"\ngraphroot = "%s/containers"\n' "$work" > ~/.config/containers/storage.conf
+          echo "WORK=$work" >> "$GITHUB_ENV"
+          echo "TMPDIR=$work/tmp" >> "$GITHUB_ENV"
+          echo "using $work"
 
       - name: Download
         env:
           SOURCE_URL: ${{ inputs.source-url }}
         run: |
-          curl -fL --retry 5 -o /mnt/work/windows10.qcow2 "$SOURCE_URL"
-          qemu-img info /mnt/work/windows10.qcow2 2>/dev/null || file /mnt/work/windows10.qcow2
-          sha256sum /mnt/work/windows10.qcow2 | tee /mnt/work/sha256
-          cp Containerfile.windows-disk /mnt/work/Containerfile
+          curl -fL --retry 5 -o $WORK/ctx/windows10.qcow2 "$SOURCE_URL"
+          qemu-img info $WORK/ctx/windows10.qcow2 2>/dev/null || file $WORK/ctx/windows10.qcow2
+          sha256sum $WORK/ctx/windows10.qcow2 | tee $WORK/ctx/sha256
+          cp Containerfile.windows-disk $WORK/ctx/Containerfile
 
       - name: Build
         id: meta
@@ -52,8 +68,11 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           podman build -t "$IMAGE:$tag" -t "$IMAGE:latest" \
             --label "org.opencontainers.image.source=${{ inputs.source-url }}" \
-            --label "tableton.windows-disk.sha256=$(cut -d' ' -f1 /mnt/work/sha256)" \
-            /mnt/work
+            --label "tableton.windows-disk.sha256=$(cut -d' ' -f1 $WORK/ctx/sha256)" \
+            $WORK/ctx
+          # The layer now holds the disk; drop the download to free room.
+          rm -f $WORK/ctx/windows10.qcow2
+          df -h "$WORK"
 
       - name: Push
         env:

@@ -37,6 +37,13 @@ jobs:
       # disk) does not fit in the job container's writable layer.
       volumes:
         - /mnt:/scratch
+        # Host directories with preinstalled SDKs we never use (~30 GB),
+        # mounted so the job can delete them; see "Free disk space".
+        - /usr/share/dotnet:/hostfree/dotnet
+        - /usr/local/lib/android:/hostfree/android
+        - /opt/ghc:/hostfree/ghc
+        - /opt/hostedtoolcache:/hostfree/toolcache
+        - /usr/local/share/boost:/hostfree/boost
     env:
       # Use this container's registration, not the (unsubscribed) host's.
       SMDEV_CONTAINER_OFF: 1
@@ -45,6 +52,12 @@ jobs:
       tag: ${{ steps.meta.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          df -h /scratch /__w 2>/dev/null || df -h
+          find /hostfree -mindepth 2 -maxdepth 2 -exec rm -rf {} + || true
+          df -h /scratch /__w 2>/dev/null || df -h
 
       - name: Container tools
         run: dnf -y install podman buildah skopeo jq
@@ -132,11 +145,24 @@ jobs:
       options: --privileged
       volumes:
         - /mnt:/scratch
+        # Host directories with preinstalled SDKs we never use (~30 GB),
+        # mounted so the job can delete them; see "Free disk space".
+        - /usr/share/dotnet:/hostfree/dotnet
+        - /usr/local/lib/android:/hostfree/android
+        - /opt/ghc:/hostfree/ghc
+        - /opt/hostedtoolcache:/hostfree/toolcache
+        - /usr/local/share/boost:/hostfree/boost
     env:
       SMDEV_CONTAINER_OFF: 1
       ISO_NAME: tableton-${{ needs.build.outputs.tag }}.iso
     steps:
       - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          df -h /scratch /__w 2>/dev/null || df -h
+          find /hostfree -mindepth 2 -maxdepth 2 -exec rm -rf {} + || true
+          df -h /scratch /__w 2>/dev/null || df -h
 
       - name: Container tools
         run: dnf -y install podman skopeo jq
